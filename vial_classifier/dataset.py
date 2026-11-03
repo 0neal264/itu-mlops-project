@@ -13,9 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
 
-# ------------------------------------------------------------------
 # Paths and settings
-# ------------------------------------------------------------------
 
 BASE_URL = "https://itudsip.hel1.your-objectstorage.com/data"
 S3_ENDPOINT = "https://itudsip.hel1.your-objectstorage.com"
@@ -30,9 +28,9 @@ transform_std = [0.229, 0.224, 0.225]
 batch_size = 32
 
 
-# ------------------------------------------------------------------
+
 # Download data
-# ------------------------------------------------------------------
+
 
 def _setup_s3_client():
     """Create a boto3 S3 client configured for Hetzner's public bucket."""
@@ -133,9 +131,9 @@ def pull_data_from_dvc():
     )
 
 
-# ------------------------------------------------------------------
+
 # Load image dataset
-# ------------------------------------------------------------------
+
 
 def load_image_dataset():
     """Load (image_path, label) pairs from the raw images and the metadata."""
@@ -168,9 +166,8 @@ def load_image_dataset():
     return image_dataset
 
 
-# ------------------------------------------------------------------
+
 # Image transformations
-# ------------------------------------------------------------------
 
 def define_transforms():
     print("Defining image transforms...")
@@ -207,9 +204,9 @@ def define_transforms():
 train_transforms, val_transforms = define_transforms()
 
 
-# ------------------------------------------------------------------
+
 # PyTorch dataset
-# ------------------------------------------------------------------
+
 
 class GlassVialDataset(Dataset):
     """Loads vial images and their labels and applies the transform."""
@@ -237,9 +234,8 @@ class GlassVialDataset(Dataset):
         return image, label
 
 
-# ------------------------------------------------------------------
+
 # Split dataset
-# ------------------------------------------------------------------
 
 def split_dataset(
     image_dataset,
@@ -315,9 +311,9 @@ def split_dataset(
     return train_dataset, val_dataset, test_dataset
 
 
-# ------------------------------------------------------------------
+
 # Create DataLoaders
-# ------------------------------------------------------------------
+
 
 def create_dataloaders(
     train_dataset,
