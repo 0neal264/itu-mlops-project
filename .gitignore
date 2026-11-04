@@ -9,3 +9,6 @@ __pycache__/
 
 # Local secrets
 .env
+
+# Downloaded training images (local data)
+data/images/raw/
