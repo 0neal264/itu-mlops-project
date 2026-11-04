@@ -1,33 +1,34 @@
-import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
 from pathlib import Path
 
 import boto3
-import numpy as np
-import pandas as pd
-import torch
 from botocore import UNSIGNED
 from botocore.config import Config
+import numpy as np
+import pandas as pd
 from PIL import Image
+import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-
-# Paths and settings
-
-BASE_URL = "https://itudsip.hel1.your-objectstorage.com/data"
-S3_ENDPOINT = "https://itudsip.hel1.your-objectstorage.com"
-S3_BUCKET = "data"
-
-image_data_dir = "./data/images/raw"
-metadata_path = "./data/images/metadata.csv"
-
-image_size = (64, 64)
-transform_mean = [0.485, 0.456, 0.406]
-transform_std = [0.229, 0.224, 0.225]
-batch_size = 32
-
-
+from vial_classifier.config import (
+    BATCH_SIZE,
+    IMAGE_DATA_DIR,
+    IMAGE_SIZE,
+    MAX_DOWNLOAD_WORKERS,
+    METADATA_PATH,
+    RANDOM_STATE,
+    S3_BUCKET,
+    S3_ENDPOINT,
+    TEST_DATA_DIR,
+    TEST_METADATA_PATH,
+    TEST_RATIO,
+    TRAIN_RATIO,
+    TRANSFORM_MEAN,
+    TRANSFORM_STD,
+    VAL_RATIO,
+)
 
 # Download data
 
@@ -87,7 +88,7 @@ def download_files_from_metadata(metadata_path, output_dir, prefix=""):
     skipped_count = 0
     failed_count = 0
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as executor:
         futures = {}
         for row in rows:
             filename = row["filename"]
@@ -120,13 +121,13 @@ def download_files_from_metadata(metadata_path, output_dir, prefix=""):
 def pull_data_from_dvc():
     """Pull the training and test images listed in the metadata from the object store."""
     download_files_from_metadata(
-        "data/images/metadata.csv",
-        "data/images/raw",
+        METADATA_PATH,
+        IMAGE_DATA_DIR,
         "images/raw/"
     )
     download_files_from_metadata(
-        "data/test/metadata.csv",
-        "data/test",
+        TEST_METADATA_PATH,
+        TEST_DATA_DIR,
         "test/"
     )
 
@@ -137,13 +138,13 @@ def pull_data_from_dvc():
 
 def load_image_dataset():
     """Load (image_path, label) pairs from the raw images and the metadata."""
-    print(f"Loading image dataset from {image_data_dir}")
-    print(f"Using metadata from {metadata_path}")
+    print(f"Loading image dataset from {IMAGE_DATA_DIR}")
+    print(f"Using metadata from {METADATA_PATH}")
 
-    if not Path(metadata_path).exists():
-        raise FileNotFoundError(f"Metadata file not found at {metadata_path}")
+    if not METADATA_PATH.exists():
+        raise FileNotFoundError(f"Metadata file not found at {METADATA_PATH}")
 
-    metadata = pd.read_csv(metadata_path)
+    metadata = pd.read_csv(METADATA_PATH)
     print(f"Metadata loaded. Total entries: {len(metadata)}")
 
     image_dataset = []
@@ -152,7 +153,7 @@ def load_image_dataset():
     for _, row in metadata.iterrows():
         filename = row["filename"]
         label = int(row["class"])
-        image_path = Path(image_data_dir) / filename
+        image_path = IMAGE_DATA_DIR / filename
 
         if image_path.exists():
             image_dataset.append((image_path, label))
@@ -174,7 +175,7 @@ def define_transforms():
 
     # Training transforms with data augmentation
     train_transforms = transforms.Compose([
-        transforms.Resize(image_size),
+        transforms.Resize(IMAGE_SIZE),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(10),
         transforms.ColorJitter(
@@ -183,14 +184,14 @@ def define_transforms():
             saturation=0.2
         ),
         transforms.ToTensor(),
-        transforms.Normalize(mean=transform_mean, std=transform_std),
+        transforms.Normalize(mean=TRANSFORM_MEAN, std=TRANSFORM_STD),
     ])
 
     # Validation transforms (no augmentation)
     val_transforms = transforms.Compose([
-        transforms.Resize(image_size),
+        transforms.Resize(IMAGE_SIZE),
         transforms.ToTensor(),
-        transforms.Normalize(mean=transform_mean, std=transform_std),
+        transforms.Normalize(mean=TRANSFORM_MEAN, std=TRANSFORM_STD),
     ])
 
     print("Training transforms: Resize, flip, rotation, jitter, ToTensor, Normalize")
@@ -239,10 +240,10 @@ class GlassVialDataset(Dataset):
 
 def split_dataset(
     image_dataset,
-    train_ratio=0.70,
-    val_ratio=0.15,
-    test_ratio=0.15,
-    random_seed=42
+    train_ratio=TRAIN_RATIO,
+    val_ratio=VAL_RATIO,
+    test_ratio=TEST_RATIO,
+    random_seed=RANDOM_STATE
 ):
     """Stratified split so both classes keep the same balance in every set."""
     print(
@@ -319,7 +320,7 @@ def create_dataloaders(
     train_dataset,
     val_dataset,
     test_dataset,
-    batch_size=batch_size
+    batch_size=BATCH_SIZE
 ):
     print(f"\nCreating DataLoaders with batch_size={batch_size}...")
 
