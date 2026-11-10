@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 from pathlib import Path
 import subprocess
+import time
 
 import boto3
 from botocore import UNSIGNED
@@ -46,17 +47,26 @@ def _setup_s3_client():
     )
 
 
+
 def _download_file_with_boto3(s3_client, key, output_path):
-    """Download a single file from S3 using boto3."""
+    """Download a file from S3, retrying if the download fails."""
     output_path = Path(output_path)
+
     if output_path.exists():
         return False
-    try:
-        s3_client.download_file(S3_BUCKET, key, str(output_path))
-        return True
-    except Exception as e:
-        print(f"Failed to download {key}: {e}")
-        return False
+
+    for attempt in range(3):
+        try:
+            s3_client.download_file(S3_BUCKET, key, str(output_path))
+            return True
+        except Exception as e:
+            if attempt < 2:
+                print(f"Download failed for {key}, retrying...")
+                time.sleep(2)
+            else:
+                print(f"Failed to download {key} after 3 attempts: {e}")
+                return False
+
 
 
 def _get_s3_key_from_url(url):
