@@ -1,8 +1,10 @@
 import numpy as np
 import torch
 
+from vial_classifier.config import THRESHOLD
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-threshold = 0.5
+threshold = THRESHOLD
 
 
 def count_classes(labels):
