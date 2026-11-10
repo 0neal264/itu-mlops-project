@@ -128,6 +128,10 @@ def download_files_from_metadata(metadata_path, output_dir, prefix=""):
         f"Downloaded {downloaded_count} images, "
         f"skipped {skipped_count} existing, failed {failed_count}"
     )
+    if failed_count > 0:
+        raise RuntimeError(
+             f"Failed to download {failed_count} images"
+    )
 
 
 def pull_data_from_dvc():
