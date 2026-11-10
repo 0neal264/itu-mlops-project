@@ -200,11 +200,6 @@ def define_transforms():
     return train_transforms, val_transforms
 
 
-# Keep this call here because the original notebook created the
-# transforms immediately after defining the function.
-train_transforms, val_transforms = define_transforms()
-
-
 
 # PyTorch dataset
 
@@ -251,9 +246,16 @@ def split_dataset(
         f"val ({val_ratio}), test ({test_ratio})..."
     )
 
-    np.random.seed(random_seed)
-    torch.manual_seed(random_seed)
+    if not all(0 <= ratio <= 1 for ratio in (train_ratio, val_ratio, test_ratio)):
+        raise ValueError("Split ratios must each be between 0 and 1.")
+    if not np.isclose(train_ratio + val_ratio + test_ratio, 1.0):
+        raise ValueError("Train, validation and test ratios must sum to 1.")
 
+    invalid_labels = {label for _, label in image_dataset if label not in (0, 1)}
+    if invalid_labels:
+        raise ValueError(f"Expected binary labels 0 and 1; found {sorted(invalid_labels)}.")
+
+    rng = np.random.default_rng(random_seed)
     class_0 = [(path, label) for path, label in image_dataset if label == 0]
     class_1 = [(path, label) for path, label in image_dataset if label == 1]
 
@@ -262,8 +264,8 @@ def split_dataset(
         f"Class 0: {len(class_0)}, Class 1: {len(class_1)}"
     )
 
-    np.random.shuffle(class_0)
-    np.random.shuffle(class_1)
+    rng.shuffle(class_0)
+    rng.shuffle(class_1)
 
     def split_class(data):
         total = len(data)
@@ -283,9 +285,9 @@ def split_dataset(
     val_dataset = val_0 + val_1
     test_dataset = test_0 + test_1
 
-    np.random.shuffle(train_dataset)
-    np.random.shuffle(val_dataset)
-    np.random.shuffle(test_dataset)
+    rng.shuffle(train_dataset)
+    rng.shuffle(val_dataset)
+    rng.shuffle(test_dataset)
 
     print("Split complete:")
     print(f"  Training set: {len(train_dataset)} images")
@@ -322,7 +324,11 @@ def create_dataloaders(
     test_dataset,
     batch_size=BATCH_SIZE
 ):
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer.")
+
     print(f"\nCreating DataLoaders with batch_size={batch_size}...")
+    train_transforms, val_transforms = define_transforms()
 
     train_paths, train_labels = (
         zip(*train_dataset) if train_dataset else ([], [])
