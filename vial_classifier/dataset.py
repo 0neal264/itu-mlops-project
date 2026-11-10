@@ -122,7 +122,16 @@ def download_files_from_metadata(metadata_path, output_dir, prefix=""):
 
 def pull_data_from_dvc():
     """Pull metadata with DVC, then download its images from the object store."""
-    subprocess.run(["dvc", "pull"], cwd=PROJ_ROOT, check=True)
+    for metadata_file in (
+        "data/images/metadata.csv.dvc",
+        "data/test/metadata.csv.dvc",
+    ):
+        subprocess.run(
+            ["dvc", "update", metadata_file],
+            cwd=PROJ_ROOT,
+            check=True,
+        )
+
     download_files_from_metadata(
         METADATA_PATH,
         IMAGE_DATA_DIR,
