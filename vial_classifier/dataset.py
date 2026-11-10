@@ -193,6 +193,7 @@ def load_image_dataset():
     return image_dataset
 
 
+
 # Image transformations
 
 def define_transforms():
@@ -404,3 +405,6 @@ def create_dataloaders(
     print(f"  Test: {len(test_loader)} batches")
 
     return train_loader, val_loader, test_loader
+
+if __name__ == "__main__":
+    pull_data_from_dvc()
