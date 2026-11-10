@@ -4,13 +4,12 @@ Run from the repository root:
     python -m vial_classifier.modeling.train
 """
 
-import json
 from copy import deepcopy
+import json
 
+from loguru import logger
 import mlflow
 import numpy as np
-import torch
-from loguru import logger
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -20,17 +19,21 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+import torch
 from torch import nn, optim
 
 from vial_classifier.config import (
     ARTIFACTS_DIR,
     BATCH_SIZE,
+    CLASS_NAMES,
+    CLASS_NAMES_PATH,
     EARLY_STOP_PATIENCE,
     EXPERIMENT_NAME,
     IMAGE_SIZE,
+    IMAGE_STATISTICS_PATH,
     LEARNING_RATE,
-    MLFLOW_ARTIFACTS_DIR,
     MLFLOW_ARTIFACT_LOCATION,
+    MLFLOW_ARTIFACTS_DIR,
     MLFLOW_STATE_DIR,
     MLFLOW_TRACKING_URI,
     MODEL_RESULTS_PATH,
@@ -39,12 +42,18 @@ from vial_classifier.config import (
     PYTORCH_MODEL_PATH,
     RANDOM_STATE,
     SCHEDULER_PATIENCE,
+    TEST_RATIO,
     THRESHOLD,
     TRAIN_RATIO,
     VAL_RATIO,
-    TEST_RATIO,
 )
-from vial_classifier.dataset import create_dataloaders, load_image_dataset, split_dataset
+from vial_classifier.dataset import (
+    create_dataloaders,
+    load_image_dataset,
+    pull_data_from_dvc,
+    split_dataset,
+)
+from vial_classifier.features import calculate_image_statistics, count_classes
 
 
 class SimpleCNN(nn.Module):
@@ -245,9 +254,15 @@ def main():
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     setup_mlflow()
 
+    pull_data_from_dvc()
     image_dataset = load_image_dataset()
     if not image_dataset:
         raise ValueError("No images found. Download the dataset before running training.")
+    labels = [label for _, label in image_dataset]
+    class_distribution = count_classes(labels)
+    logger.info("Class distribution: {}", class_distribution)
+    CLASS_NAMES_PATH.write_text(json.dumps(CLASS_NAMES, indent=2), encoding="utf-8")
+
     train_set, val_set, test_set = split_dataset(
         image_dataset,
         train_ratio=TRAIN_RATIO,
@@ -260,6 +275,8 @@ def main():
     )
     if not all(len(loader.dataset) for loader in (train_loader, val_loader, test_loader)):
         raise ValueError("Train, validation and test splits must all contain images.")
+    image_statistics = calculate_image_statistics(train_loader)
+    IMAGE_STATISTICS_PATH.write_text(json.dumps(image_statistics, indent=2), encoding="utf-8")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Training on {}", device)

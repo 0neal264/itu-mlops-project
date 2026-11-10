@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 from pathlib import Path
+import subprocess
 
 import boto3
 from botocore import UNSIGNED
@@ -18,6 +19,7 @@ from vial_classifier.config import (
     IMAGE_SIZE,
     MAX_DOWNLOAD_WORKERS,
     METADATA_PATH,
+    PROJ_ROOT,
     RANDOM_STATE,
     S3_BUCKET,
     S3_ENDPOINT,
@@ -119,7 +121,8 @@ def download_files_from_metadata(metadata_path, output_dir, prefix=""):
 
 
 def pull_data_from_dvc():
-    """Pull the training and test images listed in the metadata from the object store."""
+    """Pull metadata with DVC, then download its images from the object store."""
+    subprocess.run(["dvc", "pull"], cwd=PROJ_ROOT, check=True)
     download_files_from_metadata(
         METADATA_PATH,
         IMAGE_DATA_DIR,
@@ -165,7 +168,6 @@ def load_image_dataset():
         print(f"Warning: {len(missing_files)} image files not found")
 
     return image_dataset
-
 
 
 # Image transformations
