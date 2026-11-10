@@ -122,7 +122,9 @@ def download_files_from_metadata(metadata_path, output_dir, prefix=""):
 
 def pull_data_from_dvc():
     """Pull metadata with DVC, then download its images from the object store."""
+    # Same as the notebook's `!dvc pull`: fetches the two metadata.csv files
     subprocess.run(["dvc", "pull"], cwd=PROJ_ROOT, check=True)
+
     download_files_from_metadata(
         METADATA_PATH,
         IMAGE_DATA_DIR,
@@ -168,6 +170,7 @@ def load_image_dataset():
         print(f"Warning: {len(missing_files)} image files not found")
 
     return image_dataset
+
 
 
 # Image transformations
@@ -381,3 +384,6 @@ def create_dataloaders(
     print(f"  Test: {len(test_loader)} batches")
 
     return train_loader, val_loader, test_loader
+
+if __name__ == "__main__":
+    pull_data_from_dvc()
