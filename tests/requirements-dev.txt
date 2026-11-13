@@ -1,7 +1,0 @@
-loguru
-pytest
-python-dotenv
-ruff
-tqdm
-typer
--e .

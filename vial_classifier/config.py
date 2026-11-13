@@ -1,8 +1,12 @@
-
 from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:
+    tqdm = None
 
 load_dotenv()
 
@@ -83,11 +87,6 @@ PROD_ENDPOINT = "https://mlops-itu-jtk.ondigitalocean.app"
 
 logger.info(f"PROJ_ROOT path is: {PROJ_ROOT}")
 
-try:
-    from tqdm import tqdm
-
+if tqdm is not None:
     logger.remove(0)
     logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
-
-except ModuleNotFoundError:
-    pass

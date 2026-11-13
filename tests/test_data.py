@@ -1,7 +1,9 @@
 from pathlib import Path
+from unittest.mock import Mock, call
 
 import torch
 
+from vial_classifier import dataset as dataset_module
 from vial_classifier.config import DATA_DIR, MODELS_DIR, PROJ_ROOT
 from vial_classifier.features import calculate_image_statistics, count_classes
 
@@ -33,3 +35,30 @@ def test_calculate_image_statistics():
         "std": [0.0, 0.0, 0.0],
         "total_samples": 2,
     }
+
+
+def test_pull_data_uses_dvc_and_mocked_image_downloads(monkeypatch):
+    run_command = Mock()
+    download_metadata = Mock()
+    monkeypatch.setattr(dataset_module.subprocess, "run", run_command)
+    monkeypatch.setattr(
+        dataset_module, "download_files_from_metadata", download_metadata
+    )
+
+    dataset_module.pull_data_from_dvc()
+
+    run_command.assert_called_once_with(
+        ["dvc", "pull"], cwd=PROJ_ROOT, check=True
+    )
+    assert download_metadata.call_args_list == [
+        call(
+            dataset_module.METADATA_PATH,
+            dataset_module.IMAGE_DATA_DIR,
+            "images/raw/",
+        ),
+        call(
+            dataset_module.TEST_METADATA_PATH,
+            dataset_module.TEST_DATA_DIR,
+            "test/",
+        ),
+    ]
