@@ -4,11 +4,14 @@ Run from the repository root:
     python -m vial_classifier.modeling.train
 """
 
-from copy import deepcopy
 import json
+import time
+from copy import deepcopy
 
 from loguru import logger
 import mlflow
+from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
+from mlflow.tracking.client import MlflowClient
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
@@ -27,6 +30,7 @@ from vial_classifier.config import (
     BATCH_SIZE,
     CLASS_NAMES,
     CLASS_NAMES_PATH,
+    DRIFT_BASELINE_STATS_PATH,
     EARLY_STOP_PATIENCE,
     EXPERIMENT_NAME,
     IMAGE_SIZE,
@@ -34,8 +38,10 @@ from vial_classifier.config import (
     LEARNING_RATE,
     MLFLOW_ARTIFACT_LOCATION,
     MLFLOW_ARTIFACTS_DIR,
+    MLFLOW_MODEL_ARTIFACT_PATH,
     MLFLOW_STATE_DIR,
     MLFLOW_TRACKING_URI,
+    MODEL_NAME,
     MODEL_RESULTS_PATH,
     NUM_CLASSES,
     NUM_EPOCHS,
@@ -53,29 +59,14 @@ from vial_classifier.dataset import (
     pull_data_from_dvc,
     split_dataset,
 )
-from vial_classifier.features import calculate_image_statistics, count_classes
-
-
-class SimpleCNN(nn.Module):
-    """Notebook CNN: 64x64 RGB image -> one binary-classification logit."""
-
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.fc1 = nn.Linear(64 * 16 * 16, 128)
-        self.fc2 = nn.Linear(128, 1)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.3)
-
-    def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = torch.flatten(x, start_dim=1)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        return self.fc2(x)  # Raw logit: BCEWithLogitsLoss applies sigmoid internally.
+from vial_classifier.features import (
+    calculate_image_statistics,
+    compute_baseline_statistics,
+    count_classes,
+    print_section_header,
+)
+from vial_classifier.modeling.model import SimpleCNN
+from vial_classifier.modeling.predict import SimpleLoggingWrapper
 
 
 def _run_epoch(model, loader, criterion, device, optimizer=None):
@@ -97,7 +88,7 @@ def _run_epoch(model, loader, criterion, device, optimizer=None):
                 loss.backward()
                 optimizer.step()
 
-            total_loss += loss.item() * labels.size(0)
+            total_loss += loss.item()
             predictions = (torch.sigmoid(logits) >= THRESHOLD).int()
             all_preds.extend(predictions.detach().cpu().flatten().tolist())
             all_labels.extend(labels.detach().cpu().int().flatten().tolist())
@@ -106,10 +97,10 @@ def _run_epoch(model, loader, criterion, device, optimizer=None):
         raise ValueError("A DataLoader contains no images; check dataset preparation.")
 
     return {
-        "loss": total_loss / len(all_labels),
+        "loss": total_loss / len(loader),
         "accuracy": accuracy_score(all_labels, all_preds),
-        "f1": f1_score(all_labels, all_preds, zero_division=0),
-        "f1_macro": f1_score(all_labels, all_preds, average="macro", zero_division=0),
+        "f1": f1_score(all_labels, all_preds, average="binary"),
+        "f1_macro": f1_score(all_labels, all_preds, average="macro"),
     }
 
 
@@ -144,7 +135,8 @@ def train_cnn_model(
         "train_loss": [], "val_loss": [],
         "train_accuracy": [], "val_accuracy": [],
         "train_f1": [], "val_f1": [], "val_f1_macro": [],
-        "best_val_f1_macro": -1.0,
+        "best_val_f1_macro": 0.0,
+        "best_model_state": None,
     }
     best_weights = None
     epochs_without_improvement = 0
@@ -155,12 +147,15 @@ def train_cnn_model(
         scheduler.step(val_metrics["f1_macro"])
 
         for split, metrics in (("train", train_metrics), ("val", val_metrics)):
-            for name, value in metrics.items():
-                key = f"{split}_{name}"
-                if key in history:
-                    history[key].append(float(value))
-                if mlflow.active_run():
-                    mlflow.log_metric(key, float(value), step=epoch)
+            for name in ("loss", "accuracy", "f1"):
+                history[f"{split}_{name}"].append(metrics[name])
+            if mlflow.active_run():
+                mlflow.log_metric(f"{split}_loss", metrics["loss"], step=epoch)
+                mlflow.log_metric(f"{split}_accuracy", metrics["accuracy"], step=epoch)
+                mlflow.log_metric(f"{split}_f1_score", metrics["f1"], step=epoch)
+        history["val_f1_macro"].append(val_metrics["f1_macro"])
+        if mlflow.active_run():
+            mlflow.log_metric("val_f1_macro", val_metrics["f1_macro"], step=epoch)
 
         logger.info(
             "Epoch {}/{} | train loss {:.4f}, F1 {:.4f} | val loss {:.4f}, macro-F1 {:.4f}",
@@ -171,11 +166,15 @@ def train_cnn_model(
         if val_metrics["f1_macro"] > history["best_val_f1_macro"]:
             history["best_val_f1_macro"] = float(val_metrics["f1_macro"])
             best_weights = deepcopy(model.state_dict())
+            history["best_model_state"] = best_weights
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= EARLY_STOP_PATIENCE:
-                logger.info("Early stopping after {} epochs without improvement", EARLY_STOP_PATIENCE)
+                logger.info(
+                    "Early stopping after {} epochs without improvement",
+                    EARLY_STOP_PATIENCE,
+                )
                 break
 
     if best_weights is not None:
@@ -201,11 +200,13 @@ def tune_threshold(model, val_loader, device=None, threshold_range=None):
     device = torch.device(device or next(model.parameters()).device)
     probabilities, labels = _predict_probabilities(model, val_loader, device)
     if threshold_range is None:
-        threshold_range = np.arange(0.025, 0.976, 0.025)
-    best_threshold, best_score = THRESHOLD, -1.0
+        threshold_range = [
+            round(float(value), 3) for value in np.arange(0.025, 0.976, 0.025)
+        ]
+    best_threshold, best_score = THRESHOLD, 0.0
     for candidate in threshold_range:
         preds = (probabilities >= candidate).astype(int)
-        score = f1_score(labels, preds, average="macro", zero_division=0)
+        score = f1_score(labels, preds, average="macro")
         if score > best_score:
             best_threshold, best_score = float(candidate), float(score)
     if mlflow.active_run():
@@ -221,16 +222,13 @@ def evaluate_cnn_model(model, test_loader, device=None, threshold=THRESHOLD):
     predictions = (probabilities >= threshold).astype(int)
     results = {
         "accuracy": float(accuracy_score(labels, predictions)),
-        "f1_score": float(f1_score(labels, predictions, zero_division=0)),
-        "precision": float(precision_score(labels, predictions, zero_division=0)),
-        "recall": float(recall_score(labels, predictions, zero_division=0)),
-        "roc_auc": (
-            float(roc_auc_score(labels, probabilities))
-            if len(np.unique(labels)) == 2 else None
-        ),
-        "confusion_matrix": confusion_matrix(labels, predictions, labels=[0, 1]).tolist(),
+        "f1_score": float(f1_score(labels, predictions, average="binary")),
+        "precision": float(precision_score(labels, predictions, average="binary")),
+        "recall": float(recall_score(labels, predictions, average="binary")),
+        "roc_auc": float(roc_auc_score(labels, probabilities)),
+        "confusion_matrix": confusion_matrix(labels, predictions).tolist(),
         "classification_report": classification_report(
-            labels, predictions, labels=[0, 1], output_dict=True, zero_division=0
+            labels, predictions, output_dict=True
         ),
     }
     if mlflow.active_run():
@@ -249,6 +247,96 @@ def setup_mlflow():
     mlflow.set_experiment(EXPERIMENT_NAME)
 
 
+def wait_until_ready(model_name, model_version, max_attempts=10):
+    """Wait for an MLflow model version to finish registering."""
+    client = MlflowClient()
+    for attempt in range(max_attempts):
+        try:
+            details = client.get_model_version(name=model_name, version=model_version)
+            status = ModelVersionStatus.from_string(details.status)
+            logger.info("Model status: {}", ModelVersionStatus.to_string(status))
+            if status == ModelVersionStatus.READY:
+                return True
+        except Exception as error:
+            logger.warning(
+                "Error checking model status (attempt {}/{}): {}",
+                attempt + 1, max_attempts, error,
+            )
+        time.sleep(1)
+    logger.warning("Model {} version {} did not become READY", model_name, model_version)
+    return False
+
+
+def register_model(run_id):
+    """Register the pyfunc artifact and mark its version as the best staging model."""
+    model_uri = f"runs:/{run_id}/{MLFLOW_MODEL_ARTIFACT_PATH}"
+    model_details = mlflow.register_model(model_uri=model_uri, name=MODEL_NAME)
+    wait_until_ready(model_details.name, model_details.version)
+
+    client = MlflowClient()
+    client.transition_model_version_stage(
+        name=MODEL_NAME,
+        version=model_details.version,
+        stage="Staging",
+        archive_existing_versions=True,
+    )
+    client.set_model_version_tag(
+        MODEL_NAME, model_details.version, "deployed_to", "staging"
+    )
+    client.set_model_version_tag(
+        MODEL_NAME, model_details.version, "task", "classification"
+    )
+    client.set_registered_model_alias(
+        name=MODEL_NAME, alias="best", version=str(model_details.version)
+    )
+    return model_details
+
+
+def save_training_artifacts(model, results, baseline_stats, optimal_threshold):
+    """Save training artifacts and log the MLflow pyfunc inference model."""
+    PYTORCH_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DRIFT_BASELINE_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DRIFT_BASELINE_STATS_PATH.write_text(
+        json.dumps(baseline_stats, indent=2), encoding="utf-8"
+    )
+    baseline_metrics = {
+        "baseline_image_mean_r": baseline_stats["image_statistics"]["mean_r"],
+        "baseline_image_mean_g": baseline_stats["image_statistics"]["mean_g"],
+        "baseline_image_mean_b": baseline_stats["image_statistics"]["mean_b"],
+        "baseline_image_std_r": baseline_stats["image_statistics"]["std_r"],
+        "baseline_image_std_g": baseline_stats["image_statistics"]["std_g"],
+        "baseline_image_std_b": baseline_stats["image_statistics"]["std_b"],
+        "baseline_class_0_count": baseline_stats["class_distribution"]["class_0_count"],
+        "baseline_class_1_count": baseline_stats["class_distribution"]["class_1_count"],
+        "baseline_confidence_mean": baseline_stats["confidence_statistics"]["mean"],
+        "baseline_confidence_std": baseline_stats["confidence_statistics"]["std"],
+    }
+    for metric, value in baseline_metrics.items():
+        mlflow.log_metric(metric, value)
+    mlflow.log_artifact(str(DRIFT_BASELINE_STATS_PATH), "drift_detection")
+
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "architecture": SimpleCNN.__name__,
+            "input_shape": (3, *IMAGE_SIZE),
+            "output_shape": (1,),
+            "threshold": optimal_threshold,
+            "num_classes": NUM_CLASSES,
+        },
+        PYTORCH_MODEL_PATH,
+    )
+    MODEL_RESULTS_PATH.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    mlflow.log_param("classification_threshold", optimal_threshold)
+    mlflow.log_artifact(str(PYTORCH_MODEL_PATH))
+    mlflow.log_artifact(str(MODEL_RESULTS_PATH))
+    mlflow.pyfunc.log_model(
+        artifact_path=MLFLOW_MODEL_ARTIFACT_PATH,
+        python_model=SimpleLoggingWrapper(model=model, threshold=optimal_threshold),
+    )
+
+
 def main():
     """Load images, split, train, tune, evaluate and save the model."""
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -261,6 +349,7 @@ def main():
     labels = [label for _, label in image_dataset]
     class_distribution = count_classes(labels)
     logger.info("Class distribution: {}", class_distribution)
+    print_section_header("CNN MODEL TRAINING")
     CLASS_NAMES_PATH.write_text(json.dumps(CLASS_NAMES, indent=2), encoding="utf-8")
 
     train_set, val_set, test_set = split_dataset(
@@ -280,28 +369,60 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Training on {}", device)
-    with mlflow.start_run(run_name="cnn_training"):
+    if mlflow.active_run():
+        mlflow.end_run()
+    run = mlflow.start_run(run_name="training_notebook")
+    try:
         mlflow.log_params({
             "model_architecture": "SimpleCNN", "batch_size": BATCH_SIZE,
             "num_epochs": NUM_EPOCHS, "learning_rate": LEARNING_RATE,
             "initial_threshold": THRESHOLD, "num_classes": NUM_CLASSES,
-            "image_size": str(IMAGE_SIZE), "random_seed": RANDOM_STATE,
+            "image_size": "64x64", "random_seed": RANDOM_STATE,
         })
+        model_params = sum(parameter.numel() for parameter in SimpleCNN().parameters())
+        trainable_params = sum(
+            parameter.numel()
+            for parameter in SimpleCNN().parameters()
+            if parameter.requires_grad
+        )
+        mlflow.log_param("total_parameters", model_params)
+        mlflow.log_param("trainable_parameters", trainable_params)
+
         model, history = train_cnn_model(train_loader, val_loader, device=device)
         optimal_threshold = tune_threshold(model, val_loader, device=device)
-        results = evaluate_cnn_model(model, test_loader, device=device,
-                                     threshold=optimal_threshold)
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "architecture": SimpleCNN.__name__,
-            "input_shape": (3, *IMAGE_SIZE),
-            "output_shape": (1,),
-            "threshold": optimal_threshold,
-            "num_classes": NUM_CLASSES,
-        }, PYTORCH_MODEL_PATH)
-        MODEL_RESULTS_PATH.write_text(json.dumps(results, indent=2), encoding="utf-8")
-        mlflow.log_artifact(str(PYTORCH_MODEL_PATH))
-        mlflow.log_artifact(str(MODEL_RESULTS_PATH))
+        results = evaluate_cnn_model(
+            model,
+            test_loader,
+            device=device,
+            threshold=optimal_threshold,
+        )
+
+        baseline_stats = compute_baseline_statistics(
+            model, val_loader, device=device, threshold=optimal_threshold
+        )
+        save_training_artifacts(model, results, baseline_stats, optimal_threshold)
         logger.success("Saved model to {}", PYTORCH_MODEL_PATH)
+        mlflow.end_run()
+        model_details = register_model(run.info.run_id)
+        logger.success(
+            "Registered {} version {} in Staging",
+            model_details.name,
+            model_details.version,
+        )
+        logger.success(
+            "Training complete: train={}, validation={}, test={}, "
+            "threshold={:.4f}, test F1={:.4f}",
+            len(train_loader.dataset),
+            len(val_loader.dataset),
+            len(test_loader.dataset),
+            optimal_threshold,
+            results["f1_score"],
+        )
+    finally:
+        if mlflow.active_run():
+            mlflow.end_run()
+
+
 if __name__ == "__main__":
     main()
+
